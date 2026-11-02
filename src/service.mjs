@@ -58,6 +58,7 @@ export class DeskService {
     const t = this.row(actor, id);
     // Only the exact saved version a human approved may leave; every edit bumps the version.
     if (t.approved_version !== t.version) throw new DeskError(409, 'Approve the current draft first');
+    if (this.openAttempt(id)) throw new DeskError(409, 'A delivery is still uncertain: use Check delivery before sending again');
     // Claim this version before calling the provider: UNIQUE(ticket_id, version) stops a second send.
     const clientRef = randomUUID();
     try {
@@ -67,15 +68,49 @@ export class DeskService {
       if (!/UNIQUE/.test(e.message)) throw e;
       throw new DeskError(409, 'This version was already sent or is in progress');
     }
-    const result = await this.provider.send({ clientRef, ticketId: id, body: t.draft });
-    this.db.prepare("UPDATE attempts SET state = 'SENT', provider_id = ? WHERE client_ref = ?")
-      .run(result.providerMessageId, clientRef);
-    this.db.prepare("UPDATE tickets SET send_state = 'SENT' WHERE id = ?").run(id);
-    record(this.db, id, 'sent', `${automatic ? 'automation' : actor.id}: ${result.providerMessageId}`);
+    const by = automatic ? 'automation' : actor.id;
+    let result;
+    try {
+      result = await this.provider.send({ clientRef, ticketId: id, body: t.draft });
+    } catch (e) {
+      // 503 means definitely not accepted; anything else (504, connection loss) may have been delivered.
+      if (e.kind === 'not_accepted') {
+        this.settle(id, clientRef, 'FAILED', null, 'send_failed', `${by}: provider rejected ${clientRef}; re-save and approve to retry`);
+        throw new DeskError(502, 'Provider rejected the message; it was not delivered');
+      }
+      this.settle(id, clientRef, 'UNKNOWN', null, 'send_unknown', `${by}: no confirmation for ${clientRef}; do not resend`);
+      throw new DeskError(502, 'Delivery is uncertain: do not resend, use Check delivery');
+    }
+    this.settle(id, clientRef, 'SENT', result.providerMessageId, 'sent', `${by}: ${result.providerMessageId}`);
     return this.getTicket(actor, id);
   }
+  // Resolves the open attempt only from provider evidence; it never sends.
   async reconcile(actor, id) {
     this.row(actor, id);
-    throw new DeskError(501, 'Reconciliation has not been implemented');
+    const a = this.openAttempt(id);
+    if (!a) throw new DeskError(409, 'No uncertain delivery to check');
+    let found;
+    try {
+      found = await this.provider.lookup(a.client_ref);
+    } catch {
+      record(this.db, id, 'reconcile_failed', `${actor.id}: lookup unavailable for ${a.client_ref}; still UNKNOWN`);
+      return this.getTicket(actor, id);
+    }
+    if (found.state === 'delivered')
+      this.settle(id, a.client_ref, 'SENT', found.providerMessageId, 'reconciled_sent', `${actor.id}: provider confirmed ${found.providerMessageId}`);
+    else // not_found is inconclusive: it does not prove the message was never delivered.
+      record(this.db, id, 'reconcile_not_found', `${actor.id}: provider has no record of ${a.client_ref} yet; still UNKNOWN`);
+    return this.getTicket(actor, id);
+  }
+  openAttempt(id) {
+    return this.db.prepare("SELECT * FROM attempts WHERE ticket_id = ? AND state IN ('SENDING', 'UNKNOWN') ORDER BY id DESC")
+      .get(id);
+  }
+  settle(id, clientRef, state, providerId, action, detail) {
+    tx(this.db, () => {
+      this.db.prepare('UPDATE attempts SET state = ?, provider_id = ? WHERE client_ref = ?').run(state, providerId, clientRef);
+      this.db.prepare('UPDATE tickets SET send_state = ? WHERE id = ?').run(state, id);
+      record(this.db, id, action, detail);
+    });
   }
 }

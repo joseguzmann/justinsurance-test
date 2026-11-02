@@ -39,6 +39,9 @@ export function openStore(path) {
     INSERT OR IGNORE INTO tickets(id, tenant_id, contact, subject) VALUES
       (101, 'alpha', 'Jordan Demo', 'Cannot resume my practice exam'),
       (202, 'beta', 'Casey Example', 'Course completion is missing');
+    -- A send still SENDING at startup may or may not have reached the provider: never resend it.
+    UPDATE tickets SET send_state = 'UNKNOWN' WHERE id IN (SELECT ticket_id FROM attempts WHERE state = 'SENDING');
+    UPDATE attempts SET state = 'UNKNOWN' WHERE state = 'SENDING';
   `);
   return db;
 }
