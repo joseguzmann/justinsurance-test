@@ -11,8 +11,9 @@ export class DeskService {
   listTickets(actor) {
     return this.db.prepare('SELECT * FROM tickets WHERE tenant_id = ? ORDER BY id').all(actor.tenantId);
   }
+  // The organization comes from the server-resolved actor only; a foreign ticket looks like a missing one.
   row(actor, id) {
-    const row = this.db.prepare('SELECT * FROM tickets WHERE id = ?').get(id);
+    const row = this.db.prepare('SELECT * FROM tickets WHERE id = ? AND tenant_id = ?').get(id, actor.tenantId);
     if (!row) throw new DeskError(404, 'Ticket not found');
     return row;
   }
