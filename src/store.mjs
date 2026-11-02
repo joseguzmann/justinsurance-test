@@ -40,6 +40,9 @@ export function openStore(path) {
       (101, 'alpha', 'Jordan Demo', 'Cannot resume my practice exam'),
       (202, 'beta', 'Casey Example', 'Course completion is missing');
     -- A send still SENDING at startup may or may not have reached the provider: never resend it.
+    INSERT INTO audit(ticket_id, action, detail) SELECT ticket_id, 'send_unknown',
+      'restart: v' || version || ' was in flight as ' || client_ref || '; do not resend, use Check delivery'
+      FROM attempts WHERE state = 'SENDING';
     UPDATE tickets SET send_state = 'UNKNOWN' WHERE id IN (SELECT ticket_id FROM attempts WHERE state = 'SENDING');
     UPDATE attempts SET state = 'UNKNOWN' WHERE state = 'SENDING';
   `);
@@ -59,12 +62,27 @@ export function record(db, id, action, detail) {
 }
 
 export function ticketView(db, row) {
+  const attempts = db.prepare('SELECT * FROM attempts WHERE ticket_id = ? ORDER BY id').all(row.id);
   return {
     ...row,
+    next_action: nextAction(row, attempts),
     messages: db.prepare('SELECT * FROM messages WHERE ticket_id = ? ORDER BY id').all(row.id),
     audit: db.prepare('SELECT * FROM audit WHERE ticket_id = ? ORDER BY id').all(row.id),
-    attempts: db.prepare('SELECT * FROM attempts WHERE ticket_id = ? ORDER BY id').all(row.id)
+    attempts
   };
+}
+
+// The one safe step an agent should take next, checked in order of risk.
+export function nextAction(t, attempts) {
+  const open = attempts.findLast(a => a.state === 'SENDING' || a.state === 'UNKNOWN');
+  if (open) return `Delivery of v${open.version} is uncertain. Do not resend: use Check delivery. If the provider has no record yet, check again later.`;
+  if (!t.draft) return 'Write and save a reply draft.';
+  if (t.approved_version !== t.version) return `Review and approve draft v${t.version} before sending.`;
+  const last = attempts.findLast(a => a.version === t.version);
+  if (last?.state === 'SENT') return `Reply v${t.version} was delivered. Wait for the customer or save a new draft.`;
+  if (last?.state === 'FAILED') return `The provider rejected v${t.version}; it was not delivered. Save the draft again and approve it to retry.`;
+  return t.owner === 'human' ? `Approved v${t.version} is ready to send: use Send manually.`
+    : `Approved v${t.version} is ready to send. Take over first if a person should handle this ticket.`;
 }
 
 // Synthetic identities only. Treat server-side identity as authoritative.

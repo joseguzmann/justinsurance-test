@@ -36,16 +36,18 @@ export class DeskService {
   updateDraft(actor, id, body) {
     this.row(actor, id);
     if (typeof body !== 'string' || !body.trim()) throw new DeskError(400, 'A reply is required');
-    this.db.prepare("UPDATE tickets SET draft = ?, version = version + 1, send_state = 'DRAFT' WHERE id = ?")
+    // An edit must not hide a delivery that is still uncertain.
+    this.db.prepare(`UPDATE tickets SET draft = ?, version = version + 1,
+      send_state = CASE WHEN send_state IN ('SENDING', 'UNKNOWN') THEN send_state ELSE 'DRAFT' END WHERE id = ?`)
       .run(body, id);
-    record(this.db, id, 'draft_updated', actor.id);
+    record(this.db, id, 'draft_updated', `${actor.id}: saved v${this.row(actor, id).version}`);
     return this.getTicket(actor, id);
   }
   approveDraft(actor, id) {
     const t = this.row(actor, id);
     if (!t.draft) throw new DeskError(400, 'No draft');
     this.db.prepare('UPDATE tickets SET approved_version = version WHERE id = ?').run(id);
-    record(this.db, id, 'approved', actor.id);
+    record(this.db, id, 'approved', `${actor.id}: approved v${t.version}`);
     return this.getTicket(actor, id);
   }
   handoff(actor, id) {
