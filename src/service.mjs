@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { openStore, record, ticketView, DeskError } from './store.mjs';
+import { openStore, record, tx, ticketView, DeskError } from './store.mjs';
 
 // This inherited implementation is intentionally incomplete. See README acceptance criteria.
 export class DeskService {
@@ -21,10 +21,16 @@ export class DeskService {
     const t = this.db.prepare('SELECT * FROM tickets WHERE id = ? AND tenant_id = ?')
       .get(event.ticketId, event.tenantId);
     if (!t || !event.eventId || typeof event.body !== 'string') throw new DeskError(400, 'Invalid event');
-    this.db.prepare('INSERT INTO messages(ticket_id, event_id, body) VALUES (?, ?, ?)')
-      .run(t.id, event.eventId, event.body);
-    record(this.db, t.id, 'inbound', event.eventId);
-    return { accepted: true };
+    // Event identity is (tenant, eventId); the primary key turns a replay into a no-op.
+    return tx(this.db, () => {
+      const seen = this.db.prepare('INSERT OR IGNORE INTO inbound_events(tenant_id, event_id, ticket_id) VALUES (?, ?, ?)')
+        .run(t.tenant_id, event.eventId, t.id);
+      if (!seen.changes) return { accepted: true, duplicate: true };
+      this.db.prepare('INSERT INTO messages(ticket_id, event_id, body) VALUES (?, ?, ?)')
+        .run(t.id, event.eventId, event.body);
+      record(this.db, t.id, 'inbound', event.eventId);
+      return { accepted: true };
+    });
   }
   updateDraft(actor, id, body) {
     this.row(actor, id);
