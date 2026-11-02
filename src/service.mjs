@@ -56,6 +56,11 @@ export class DeskService {
   }
   async sendReply(actor, id, { automatic = false } = {}) {
     const t = this.row(actor, id);
+    // Takeover is checked on the server, synchronously before the claim, so no handoff can slip in between.
+    if (automatic && t.owner === 'human') {
+      record(this.db, id, 'automation_refused', 'automation: a human owns this ticket');
+      throw new DeskError(409, 'A human has taken over this ticket; automation may not send');
+    }
     // Only the exact saved version a human approved may leave; every edit bumps the version.
     if (t.approved_version !== t.version) throw new DeskError(409, 'Approve the current draft first');
     if (this.openAttempt(id)) throw new DeskError(409, 'A delivery is still uncertain: use Check delivery before sending again');
