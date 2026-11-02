@@ -56,16 +56,20 @@ export class DeskService {
   }
   async sendReply(actor, id, { automatic = false } = {}) {
     const t = this.row(actor, id);
-    if (t.approved_version == null) throw new DeskError(409, 'Approve the reply first');
-    let result;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        result = await this.provider.send({ clientRef: randomUUID(), ticketId: id, body: t.draft });
-        break;
-      } catch (error) {
-        if (attempt === 1) throw error;
-      }
+    // Only the exact saved version a human approved may leave; every edit bumps the version.
+    if (t.approved_version !== t.version) throw new DeskError(409, 'Approve the current draft first');
+    // Claim this version before calling the provider: UNIQUE(ticket_id, version) stops a second send.
+    const clientRef = randomUUID();
+    try {
+      this.db.prepare("INSERT INTO attempts(ticket_id, version, client_ref, body, state) VALUES (?, ?, ?, ?, 'SENDING')")
+        .run(id, t.version, clientRef, t.draft);
+    } catch (e) {
+      if (!/UNIQUE/.test(e.message)) throw e;
+      throw new DeskError(409, 'This version was already sent or is in progress');
     }
+    const result = await this.provider.send({ clientRef, ticketId: id, body: t.draft });
+    this.db.prepare("UPDATE attempts SET state = 'SENT', provider_id = ? WHERE client_ref = ?")
+      .run(result.providerMessageId, clientRef);
     this.db.prepare("UPDATE tickets SET send_state = 'SENT' WHERE id = ?").run(id);
     record(this.db, id, 'sent', `${automatic ? 'automation' : actor.id}: ${result.providerMessageId}`);
     return this.getTicket(actor, id);
