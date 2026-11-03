@@ -113,6 +113,28 @@ test('a database created with the old one-attempt-per-version rule is upgraded o
   } finally { s.close(); }
 });
 
+// The send is still waiting when Check delivery confirms it; then the provider's late answer arrives.
+for (const [late, answer] of [['200', () => ({ providerMessageId: 'p-1' })], ['504', timeout]]) {
+  test(`a late ${late} after Check delivery confirmed the send changes nothing`, async () => {
+    let answerNow;
+    const provider = fakeProvider({ lookup: async () => ({ state: 'delivered', providerMessageId: 'p-1', count: 1 }) });
+    provider.send = async m => { provider.sends.push(m); await new Promise(r => { answerNow = r; }); return answer(); };
+    const s = new DeskService({ provider });
+    try {
+      approved(s);
+      const sending = status(() => s.sendReply(alpha, 101));
+      await new Promise(r => setImmediate(r));
+      await s.reconcile(alpha, 101);
+      answerNow();
+      assert.equal(await sending, 200, 'the late answer is not reported as a failure');
+      const t = s.getTicket(alpha, 101);
+      assert.equal(t.attempts.at(-1).state, 'SENT');
+      assert.equal(t.send_state, 'SENT');
+      assert.deepEqual(t.audit.map(a => a.action).filter(a => a.startsWith('sen') || a.startsWith('rec')), ['reconciled_sent']);
+    } finally { s.close(); }
+  });
+}
+
 test('an attempt left SENDING by a restart becomes UNKNOWN and is not resent', async () => {
   const databasePath = join(mkdtempSync(join(tmpdir(), 'desk-r4-')), 'desk.sqlite');
   const hanging = fakeProvider({ onSend: () => new Promise(() => {}) });

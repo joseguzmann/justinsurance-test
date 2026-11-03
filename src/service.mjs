@@ -81,11 +81,14 @@ export class DeskService {
       result = await this.provider.send({ clientRef, ticketId: id, body: t.draft });
     } catch (e) {
       // 503 means definitely not accepted; anything else (504, connection loss) may have been delivered.
+      // If settle changes nothing, Check delivery already resolved this attempt while we waited: the late error is stale.
       if (e.kind === 'not_accepted') {
-        this.settle(id, clientRef, 'FAILED', null, 'send_failed', `${by}: provider rejected ${clientRef}; not delivered, safe to send again`);
+        if (!this.settle(id, clientRef, 'FAILED', null, 'send_failed', `${by}: provider rejected ${clientRef}; not delivered, safe to send again`))
+          return this.getTicket(actor, id);
         throw new DeskError(502, 'Provider rejected the message; it was not delivered');
       }
-      this.settle(id, clientRef, 'UNKNOWN', null, 'send_unknown', `${by}: no confirmation for ${clientRef}; do not resend`);
+      if (!this.settle(id, clientRef, 'UNKNOWN', null, 'send_unknown', `${by}: no confirmation for ${clientRef}; do not resend`))
+        return this.getTicket(actor, id);
       throw new DeskError(502, 'Delivery is uncertain: do not resend, use Check delivery');
     }
     this.settle(id, clientRef, 'SENT', result.providerMessageId, 'sent', `${by}: ${result.providerMessageId}`);
@@ -113,11 +116,15 @@ export class DeskService {
     return this.db.prepare("SELECT * FROM attempts WHERE ticket_id = ? AND state IN ('SENDING', 'UNKNOWN') ORDER BY id DESC")
       .get(id);
   }
+  // Only an attempt still in doubt can be settled: a late or repeated answer for a resolved one changes nothing.
   settle(id, clientRef, state, providerId, action, detail) {
-    tx(this.db, () => {
-      this.db.prepare('UPDATE attempts SET state = ?, provider_id = ? WHERE client_ref = ?').run(state, providerId, clientRef);
+    return tx(this.db, () => {
+      const moved = this.db.prepare("UPDATE attempts SET state = ?, provider_id = ? WHERE client_ref = ? AND state IN ('SENDING', 'UNKNOWN')")
+        .run(state, providerId, clientRef);
+      if (!moved.changes) return false;
       this.db.prepare('UPDATE tickets SET send_state = ? WHERE id = ?').run(state, id);
       record(this.db, id, action, detail);
+      return true;
     });
   }
 }
