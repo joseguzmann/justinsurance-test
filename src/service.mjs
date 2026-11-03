@@ -76,6 +76,8 @@ export class DeskService {
       throw new DeskError(409, 'This version was already sent or is in progress');
     }
     const by = automatic ? 'automation' : actor.id;
+    // Record who dispatched which attempt before waiting on the provider, so a later takeover or restart cannot hide it.
+    record(this.db, id, 'dispatching', `${by}: v${t.version} as ${clientRef}`);
     let result;
     try {
       result = await this.provider.send({ clientRef, ticketId: id, body: t.draft });

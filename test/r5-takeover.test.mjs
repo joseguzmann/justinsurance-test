@@ -44,3 +44,23 @@ test('after takeover, the human can still send the approved reply', async () => 
     assert.equal(provider.sends.length, 1);
   } finally { s.close(); }
 });
+
+test('an automation dispatch in flight at takeover is audited as automation, before the handoff', async () => {
+  let answerNow;
+  const provider = fakeProvider();
+  provider.send = async m => { provider.sends.push(m); await new Promise(r => { answerNow = r; }); return { providerMessageId: 'p-1' }; };
+  const s = new DeskService({ provider });
+  try {
+    approved(s);
+    const sending = s.sendReply(alpha, 101, { automatic: true });
+    s.handoff(alpha, 101); // the human takes over while the provider is still answering
+    answerNow();
+    await sending;
+    const ref = s.getTicket(alpha, 101).attempts[0].client_ref;
+    const audit = s.getTicket(alpha, 101).audit;
+    const dispatch = audit.findIndex(a => a.detail.includes(ref));
+    const handoff = audit.findIndex(a => a.action === 'human_handoff');
+    assert.ok(dispatch >= 0 && dispatch < handoff, 'the dispatch is recorded before the handoff');
+    assert.match(audit[dispatch].detail, /^automation:/);
+  } finally { s.close(); }
+});
