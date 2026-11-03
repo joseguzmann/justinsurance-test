@@ -76,6 +76,43 @@ test('an explicit rejection is a safe FAILED, and a re-approved draft can be sen
   } finally { s.close(); }
 });
 
+test('after an explicit rejection the same version can be sent again with a new clientRef', async () => {
+  const provider = fakeProvider({ onSend: rejected });
+  const s = new DeskService({ provider });
+  try {
+    approved(s);
+    await status(() => s.sendReply(alpha, 101));
+    provider.send = async m => { provider.sends.push(m); return timeout(); };
+    assert.equal(await status(() => s.sendReply(alpha, 101)), 502);
+    const [first, second] = s.getTicket(alpha, 101).attempts;
+    assert.deepEqual([first.state, second?.state], ['FAILED', 'UNKNOWN']);
+    assert.notEqual(first.client_ref, second.client_ref);
+    const looked = [];
+    provider.lookup = async ref => { looked.push(ref); return { state: 'delivered', providerMessageId: 'p-2', count: 1 }; };
+    await s.reconcile(alpha, 101);
+    assert.deepEqual(looked, [second.client_ref], 'Check delivery must follow the latest attempt');
+    assert.equal(await status(() => s.sendReply(alpha, 101)), 409, 'a delivered version is never sent twice');
+  } finally { s.close(); }
+});
+
+test('a database created with the old one-attempt-per-version rule is upgraded on startup', async () => {
+  const databasePath = join(mkdtempSync(join(tmpdir(), 'desk-r4-')), 'desk.sqlite');
+  const { DatabaseSync } = await import('node:sqlite');
+  const old = new DatabaseSync(databasePath);
+  old.exec(`CREATE TABLE attempts (id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL, version INTEGER NOT NULL,
+    client_ref TEXT NOT NULL UNIQUE, body TEXT NOT NULL, state TEXT NOT NULL, provider_id TEXT, UNIQUE(ticket_id, version))`);
+  old.close();
+  const provider = fakeProvider({ onSend: rejected });
+  const s = new DeskService({ databasePath, provider });
+  try {
+    approved(s);
+    await status(() => s.sendReply(alpha, 101));
+    provider.send = async m => { provider.sends.push(m); return { providerMessageId: 'p-2' }; };
+    await s.sendReply(alpha, 101);
+    assert.deepEqual(s.getTicket(alpha, 101).attempts.map(a => a.state), ['FAILED', 'SENT']);
+  } finally { s.close(); }
+});
+
 test('an attempt left SENDING by a restart becomes UNKNOWN and is not resent', async () => {
   const databasePath = join(mkdtempSync(join(tmpdir(), 'desk-r4-')), 'desk.sqlite');
   const hanging = fakeProvider({ onSend: () => new Promise(() => {}) });

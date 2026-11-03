@@ -66,7 +66,7 @@ export class DeskService {
     // Only the exact saved version a human approved may leave; every edit bumps the version.
     if (t.approved_version !== t.version) throw new DeskError(409, 'Approve the current draft first');
     if (this.openAttempt(id)) throw new DeskError(409, 'A delivery is still uncertain: use Check delivery before sending again');
-    // Claim this version before calling the provider: UNIQUE(ticket_id, version) stops a second send.
+    // Claim this version before calling the provider: the attempts_live_once index stops a second send.
     const clientRef = randomUUID();
     try {
       this.db.prepare("INSERT INTO attempts(ticket_id, version, client_ref, body, state) VALUES (?, ?, ?, ?, 'SENDING')")
@@ -82,7 +82,7 @@ export class DeskService {
     } catch (e) {
       // 503 means definitely not accepted; anything else (504, connection loss) may have been delivered.
       if (e.kind === 'not_accepted') {
-        this.settle(id, clientRef, 'FAILED', null, 'send_failed', `${by}: provider rejected ${clientRef}; re-save and approve to retry`);
+        this.settle(id, clientRef, 'FAILED', null, 'send_failed', `${by}: provider rejected ${clientRef}; not delivered, safe to send again`);
         throw new DeskError(502, 'Provider rejected the message; it was not delivered');
       }
       this.settle(id, clientRef, 'UNKNOWN', null, 'send_unknown', `${by}: no confirmation for ${clientRef}; do not resend`);

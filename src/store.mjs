@@ -29,8 +29,7 @@ export function openStore(path) {
     CREATE TABLE IF NOT EXISTS attempts (
       id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL, version INTEGER NOT NULL,
       client_ref TEXT NOT NULL UNIQUE, body TEXT NOT NULL,
-      state TEXT NOT NULL, provider_id TEXT,
-      UNIQUE(ticket_id, version)
+      state TEXT NOT NULL, provider_id TEXT
     );
     CREATE TABLE IF NOT EXISTS inbound_events (
       tenant_id TEXT NOT NULL, event_id TEXT NOT NULL, ticket_id INTEGER NOT NULL,
@@ -46,7 +45,25 @@ export function openStore(path) {
     UPDATE tickets SET send_state = 'UNKNOWN' WHERE id IN (SELECT ticket_id FROM attempts WHERE state = 'SENDING');
     UPDATE attempts SET state = 'UNKNOWN' WHERE state = 'SENDING';
   `);
+  allowRetryAfterFailure(db);
   return db;
+}
+
+// One live attempt per version (SENDING, UNKNOWN or SENT); a FAILED one was never accepted, so it may be retried.
+// Older stores declare UNIQUE(ticket_id, version) on the table, which SQLite cannot drop: rebuild once, keeping rows.
+function allowRetryAfterFailure(db) {
+  const { sql } = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attempts'").get();
+  if (/UNIQUE\s*\(\s*ticket_id\s*,\s*version\s*\)/i.test(sql)) tx(db, () => db.exec(`
+    CREATE TABLE attempts_new (
+      id INTEGER PRIMARY KEY, ticket_id INTEGER NOT NULL, version INTEGER NOT NULL,
+      client_ref TEXT NOT NULL UNIQUE, body TEXT NOT NULL,
+      state TEXT NOT NULL, provider_id TEXT
+    );
+    INSERT INTO attempts_new SELECT id, ticket_id, version, client_ref, body, state, provider_id FROM attempts;
+    DROP TABLE attempts;
+    ALTER TABLE attempts_new RENAME TO attempts;
+  `));
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS attempts_live_once ON attempts(ticket_id, version) WHERE state <> 'FAILED'");
 }
 
 // All writes inside fn commit together or not at all.
@@ -80,7 +97,7 @@ export function nextAction(t, attempts) {
   if (t.approved_version !== t.version) return `Review and approve draft v${t.version} before sending.`;
   const last = attempts.findLast(a => a.version === t.version);
   if (last?.state === 'SENT') return `Reply v${t.version} was delivered. Wait for the customer or save a new draft.`;
-  if (last?.state === 'FAILED') return `The provider rejected v${t.version}; it was not delivered. Save the draft again and approve it to retry.`;
+  if (last?.state === 'FAILED') return `The provider rejected v${t.version}; it was not delivered. It is safe to send it again.`;
   return t.owner === 'human' ? `Approved v${t.version} is ready to send: use Send manually.`
     : `Approved v${t.version} is ready to send. Take over first if a person should handle this ticket.`;
 }
